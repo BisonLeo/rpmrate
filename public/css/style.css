@@ -1,0 +1,136 @@
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --bg: #0f0f1a;
+  --surface: #1a1a2e;
+  --surface2: #24243e;
+  --text: #e0e0f0;
+  --text-dim: #7070a0;
+  --accent: #ff6b35;
+  --accent-glow: rgba(255, 107, 53, 0.3);
+  --event-color: rgba(100, 149, 237, 0.7);
+  --playhead: #00e5ff;
+  --playhead-glow: rgba(0, 229, 255, 0.25);
+  --grid: rgba(255, 255, 255, 0.06);
+  --tick: rgba(255, 255, 255, 0.15);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top: env(safe-area-inset-top, 0px);
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  height: 100dvh;
+  padding-top: var(--safe-top);
+  padding-bottom: var(--safe-bottom);
+}
+
+/* --- BPM Panel --- */
+#bpm-panel {
+  flex-shrink: 0;
+  text-align: center;
+  padding: 12px 16px 6px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--surface2);
+}
+
+#bpm-value {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+}
+
+#bpm-display {
+  font-size: 56px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -1px;
+  line-height: 1;
+  color: var(--accent);
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+}
+
+#bpm-unit {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+
+#bpm-sub {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  padding-top: 4px;
+}
+
+/* --- Canvas --- */
+#timeline {
+  flex: 1;
+  width: 100%;
+  display: block;
+  touch-action: none;
+  cursor: pointer;
+}
+
+/* --- Status Bar --- */
+#status-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--surface2);
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+#pause-btn {
+  background: var(--surface2);
+  border: 1px solid var(--text-dim);
+  color: var(--text);
+  font-size: 14px;
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  letter-spacing: 1px;
+  transition: background 0.15s, border-color 0.15s;
+  touch-action: manipulation;
+}
+
+#pause-btn:active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+#pause-btn.paused {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+#status-text {
+  text-align: right;
+}

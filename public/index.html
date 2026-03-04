@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>BPM Rate</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="app">
+    <div id="bpm-panel">
+      <div id="bpm-value">
+        <span id="bpm-display">--</span>
+        <span id="bpm-unit">BPM</span>
+      </div>
+      <div id="bpm-sub">
+        <span id="k-display">k: --</span>
+        <span id="theta-display">&theta;: --</span>
+      </div>
+    </div>
+    <canvas id="timeline"></canvas>
+    <div id="status-bar">
+      <span id="tap-count">0 taps</span>
+      <button id="pause-btn" title="Pause/Resume">&#9646;&#9646;</button>
+      <span id="status-text">Tap anywhere to start</span>
+    </div>
+  </div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

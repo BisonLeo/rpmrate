@@ -1,0 +1,8 @@
+{
+  "name": "rpmrate",
+  "version": "1.0.0",
+  "description": "Real-time BPM estimator using Gamma distribution state-space filtering",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
