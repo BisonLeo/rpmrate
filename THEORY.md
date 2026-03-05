@@ -174,8 +174,95 @@ k_0=\frac{\bar\Delta^2}{s^2},\qquad \theta_0=\frac{s^2}{\bar\Delta}
 4. 输出 (\mathrm{BPM}(t)=60\exp(-(x_t+y_t)))。
 
 ---
+Regularity Definition                                                                                                                                                                                                                                                                   Regularity is measured by the Coefficient of Variation (CV), which quantifies how much the inter-tap intervals vary relative to their       mean:                                                                                                                                                                                                                                                                                   CV = σ / μ
 
-如果你给我两样东西，我可以把上面变成可直接运行的代码（Python 或 Matlab/C++ 都行）并把关键超参（窗口、裁剪、(\lambda)）调到不抖：
+  where:
+    σ = standard deviation of intervals
+    μ = mean interval
 
-1. 事件时间戳序列（秒）或原始信号 + 事件检测结果
-2. 你希望的输出刷新率与“允许的延迟/滞后”范围（比如最多滞后 1–2 秒）
+  Examples:
+
+  - Perfect metronome: CV ≈ 0% (no variation)
+  - Very regular tapping: CV ≈ 5-10%
+  - Normal human tapping: CV ≈ 20-30%
+  - Irregular/sloppy tapping: CV ≈ 40-80%
+
+  How CV Relates to k
+
+  For a Gamma(k, θ) distribution:
+
+  Mean: μ = k × θ
+  Variance: σ² = k × θ²
+
+  Therefore:
+  CV = σ/μ = √(k×θ²) / (k×θ) = √(θ²/θ²) × √(1/k) = 1/√k
+
+  Solving for k:
+  k = 1 / CV²
+
+  Examples:
+
+  ┌───────────────────┬─────┬─────┬──────────────────────────────────┐
+  │    Regularity     │ CV  │  k  │          Interpretation          │
+  ├───────────────────┼─────┼─────┼──────────────────────────────────┤
+  │ Perfect metronome │ 5%  │ 400 │ Very peaked, narrow distribution │
+  ├───────────────────┼─────┼─────┼──────────────────────────────────┤
+  │ Clean tapping     │ 10% │ 100 │ Peaked distribution              │
+  ├───────────────────┼─────┼─────┼──────────────────────────────────┤
+  │ Normal tapping    │ 20% │ 25  │ Moderate spread                  │
+  ├───────────────────┼─────┼─────┼──────────────────────────────────┤
+  │ Irregular tapping │ 30% │ 11  │ Wide spread                      │
+  ├───────────────────┼─────┼─────┼──────────────────────────────────┤
+  │ Very irregular    │ 50% │ 4   │ Very wide, heavy tail            │
+  └───────────────────┴─────┴─────┴──────────────────────────────────┘
+
+  How the Code Estimates k
+
+  In _estimateK():
+
+  // 1. Take last 25 intervals
+  const recentDeltas = this.intervals.slice(-25).map(i => i.delta);
+
+  // 2. Robust estimation using median and MAD (not mean/std)
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const mad = medianAbsoluteDeviation(recentDeltas);
+
+  // 3. Convert MAD to standard deviation estimate
+  const sigma = 1.4826 × mad;  // MAD → σ conversion factor
+
+  // 4. Calculate CV
+  const cv = sigma / median;
+
+  // 5. Calculate k
+  k = 1 / (cv × cv);
+
+  // 6. Clamp to [2, 100]
+  k = Math.max(2, Math.min(100, k));
+
+  Why Robust Estimation?
+
+  We use median and MAD instead of mean and standard deviation because:
+  - Outliers (missed taps, accidental double-taps) don't destroy the estimate
+  - MAD is the median of |x - median(x)|, very resistant to outliers
+  - The factor 1.4826 converts MAD to equivalent standard deviation for normal data
+
+  Physical Interpretation
+
+  k controls the "peakedness" of the Gamma distribution:
+
+  - Large k (regular): The likelihood function strongly penalizes intervals far from the mean. The filter trusts each new interval and
+  responds quickly.
+  - Small k (irregular): The likelihood function is more tolerant of variation. The filter smooths more aggressively, trusting the prior
+  over noisy observations.
+
+  Why Fix k?
+
+  When both k and θ are free parameters:
+  - They can "trade off": k↑ and θ↓ while k×θ stays constant
+  - This causes parameter jitter even when BPM is stable
+  - Fixing k based on observed regularity eliminates this degeneracy
+
+  By estimating k from a long window (25 intervals) and then fixing it, we:
+  1. Capture the user's actual tapping regularity
+  2. Simplify the problem to 1D (only track θ, which directly controls BPM)
+  3. Get much more stable, smooth BPM estimates

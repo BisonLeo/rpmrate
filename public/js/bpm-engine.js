@@ -12,10 +12,18 @@ export class BPMEngine {
     // Process noise (controls smoothness vs responsiveness tradeoff)
     this.qxBase = options.qx ?? 0.04;
     this.qyBase = options.qy ?? 0.04;
+    this.lambda2 = options.lambda2 ?? 1.0; // 2nd-order smoothness penalty
 
     // Outlier thresholds
     this.minDelta = options.minDelta ?? 0.08;  // seconds (~750 BPM ceiling)
     this.maxDelta = options.maxDelta ?? 5.0;   // seconds (~12 BPM floor)
+
+    // Adaptive k estimation
+    this.kEstimationWindow = options.kEstimationWindow ?? 25; // intervals to use for k estimation
+    this.kEstimationInterval = options.kEstimationInterval ?? 5; // re-estimate k every N intervals
+    this.minKEstimationSamples = 10; // minimum samples before fixing k
+    this.fixedK = null; // will be estimated adaptively
+    this.kEstimationCounter = 0;
 
     // Newton solver settings
     this.maxIter = 8;
@@ -25,6 +33,10 @@ export class BPMEngine {
     // State (log-space)
     this.x = 0; // log(k)
     this.y = 0; // log(theta)
+    this.xPrev = 0; // x one step back
+    this.yPrev = 0; // y one step back
+    this.xPrev2 = 0; // x two steps back (for 2nd-order smoothness)
+    this.yPrev2 = 0; // y two steps back
 
     // Data storage
     this.events = [];       // [{time: ms}]
@@ -66,6 +78,12 @@ export class BPMEngine {
       return this.getBPM();
     }
 
+    // Discard or mark gap for too-long intervals
+    if (delta > this.maxDelta) {
+      this.pauseGap = true; // next interval won't use this event as previous
+      return this.getBPM();
+    }
+
     this.intervals.push({ time: timeMs, delta });
 
     if (this.intervals.length === 1) {
@@ -75,6 +93,13 @@ export class BPMEngine {
       // Two intervals: moment estimation to initialize Gamma params
       this._initFromMoments(timeMs);
     } else {
+      // Periodically re-estimate k from long window
+      this.kEstimationCounter++;
+      if (this.kEstimationCounter >= this.kEstimationInterval) {
+        this._estimateK();
+        this.kEstimationCounter = 0;
+      }
+
       // Run state-space update
       this._updateState(delta, timeMs);
     }
@@ -108,11 +133,54 @@ export class BPMEngine {
 
   // --- Private methods ---
 
+  /**
+   * Estimate k from a sliding window using robust CV estimation.
+   * Sets this.fixedK once enough samples are available.
+   */
+  _estimateK() {
+    const n = this.intervals.length;
+    if (n < this.minKEstimationSamples) return;
+
+    // Use last kEstimationWindow intervals
+    const windowSize = Math.min(this.kEstimationWindow, n);
+    const recentDeltas = this.intervals.slice(-windowSize).map(i => i.delta);
+
+    // Robust CV estimation using median and MAD
+    const sorted = [...recentDeltas].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+
+    // MAD (median absolute deviation)
+    const absDevs = recentDeltas.map(d => Math.abs(d - median));
+    absDevs.sort((a, b) => a - b);
+    const mad = absDevs[Math.floor(absDevs.length / 2)];
+
+    // Convert MAD to std estimate: σ ≈ 1.4826 * MAD
+    const sigma = 1.4826 * mad;
+
+    // CV = σ / μ
+    const cv = sigma / Math.max(median, 0.01);
+
+    // k = 1 / CV²
+    let k = 1 / (cv * cv);
+
+    // Clamp to reasonable range
+    // Lower bound: k >= 2 (CV <= 70%)
+    // Upper bound: k <= 100 (CV >= 10%) - reduced from 200 to avoid theta underflow
+    k = Math.max(2, Math.min(100, k));
+
+    this.fixedK = k;
+    this.x = Math.log(k);
+  }
+
   _initFromSingleInterval(delta, timeMs) {
     // BPM = 60/delta, set k=1 (exponential) as starting point
     const bpm = 60 / delta;
     this.x = 0;           // log(1) = 0
     this.y = Math.log(delta); // theta = delta when k=1
+    this.xPrev = this.x;
+    this.yPrev = this.y;
+    this.xPrev2 = this.x;
+    this.yPrev2 = this.y;
     this.initialized = true;
     this.bpmHistory.push({ time: timeMs, bpm });
   }
@@ -141,6 +209,10 @@ export class BPMEngine {
 
     this.x = Math.log(k);
     this.y = Math.log(theta);
+    this.xPrev = this.x;
+    this.yPrev = this.y;
+    this.xPrev2 = this.x;
+    this.yPrev2 = this.y;
     this.initialized = true;
 
     const bpm = 60 / (k * theta);
@@ -148,11 +220,14 @@ export class BPMEngine {
   }
 
   _updateState(delta, timeMs) {
-    const xPrev = this.x;
-    const yPrev = this.y;
+    // Save previous states for 2nd-order smoothness
+    this.xPrev2 = this.xPrev;
+    this.yPrev2 = this.yPrev;
+    this.xPrev = this.x;
+    this.yPrev = this.y;
 
     // Compute adaptive process noise
-    const expectedDelta = Math.exp(xPrev + yPrev); // k * theta
+    const expectedDelta = Math.exp(this.xPrev + this.yPrev); // k * theta
     const innovation = Math.abs(delta - expectedDelta) / Math.max(expectedDelta, 0.01);
     const adaptiveFactor = 1 + 10 * innovation * innovation;
 
@@ -162,9 +237,85 @@ export class BPMEngine {
     const qx = this.qxBase * adaptiveFactor * timeRatio;
     const qy = this.qyBase * adaptiveFactor * timeRatio;
 
-    // Newton's method to solve recursive MAP
-    let x = xPrev;
-    let y = yPrev;
+    // Check if k is fixed
+    if (this.fixedK !== null) {
+      // 1D Newton on y only
+      this._updateStateFixedK(delta, timeMs, qy);
+    } else {
+      // 2D Newton on both x and y
+      this._updateState2D(delta, timeMs, qx, qy);
+    }
+
+    const bpm = 60 * Math.exp(-(this.x + this.y));
+    // Clamp BPM to reasonable range
+    const clampedBpm = Math.max(1, Math.min(600, bpm));
+    this.bpmHistory.push({ time: timeMs, bpm: clampedBpm });
+  }
+
+  _updateStateFixedK(delta, timeMs, qy) {
+    // k is fixed, only update y (theta)
+    const k = this.fixedK;
+    this.x = Math.log(k); // keep x constant
+
+    let y = this.yPrev;
+
+    for (let iter = 0; iter < this.maxIter; iter++) {
+      const theta = Math.exp(y);
+
+      // Gradient of L w.r.t. y
+      // ℓ_y = δ/θ - k
+      // Prior: -1/(2qy) * (y - yPrev)² for 1st order
+      // 2nd order: -λ₂ * (y - 2*yPrev + yPrev2)²
+      let gy = delta / theta - k - (y - this.yPrev) / qy;
+
+      // Add 2nd-order smoothness gradient
+      if (this.intervals.length > 2) {
+        const d2y = y - 2 * this.yPrev + this.yPrev2;
+        gy -= 2 * this.lambda2 * d2y;
+      }
+
+      // Check convergence
+      if (Math.abs(gy) < this.tolerance) break;
+
+      // Hessian of L w.r.t. y
+      // ℓ_yy = -δ/θ
+      let Hyy = -delta / theta - 1 / qy;
+
+      // Add 2nd-order smoothness Hessian
+      if (this.intervals.length > 2) {
+        Hyy -= 2 * this.lambda2;
+      }
+
+      // Newton step: dy = -gy / Hyy
+      // For maximization, Hyy should be negative
+      if (Hyy >= 0) {
+        // Hessian not negative, use gradient ascent
+        const stepSize = 0.01;
+        y += stepSize * gy;
+      } else {
+        const dy = -gy / Hyy;
+        // Damped step
+        const dampedDy = Math.max(-this.maxStep, Math.min(this.maxStep, dy));
+        y += dampedDy;
+      }
+
+      // Clamp theta to reasonable range based on k
+      // For BPM range [20, 600]: μ = k*θ ∈ [0.1, 3]
+      // So θ ∈ [0.1/k, 3/k]
+      const thetaMin = 0.1 / k;
+      const thetaMax = 3.0 / k;
+      const thetaNew = Math.exp(y);
+      if (thetaNew < thetaMin) y = Math.log(thetaMin);
+      if (thetaNew > thetaMax) y = Math.log(thetaMax);
+    }
+
+    this.y = y;
+  }
+
+  _updateState2D(delta, timeMs, qx, qy) {
+    // 2D Newton on both x and y
+    let x = this.xPrev;
+    let y = this.yPrev;
 
     for (let iter = 0; iter < this.maxIter; iter++) {
       const k = Math.exp(x);
@@ -174,31 +325,40 @@ export class BPMEngine {
       const logDelta = Math.log(delta);
 
       // Gradient of L = ell(x,y;delta) - prior
-      const gx = k * (logDelta - y - psi) - (x - xPrev) / qx;
-      const gy = delta / theta - k - (y - yPrev) / qy;
+      let gx = k * (logDelta - y - psi) - (x - this.xPrev) / qx;
+      let gy = delta / theta - k - (y - this.yPrev) / qy;
+
+      // Add 2nd-order smoothness gradient
+      if (this.intervals.length > 2) {
+        const d2x = x - 2 * this.xPrev + this.xPrev2;
+        const d2y = y - 2 * this.yPrev + this.yPrev2;
+        gx -= 2 * this.lambda2 * d2x;
+        gy -= 2 * this.lambda2 * d2y;
+      }
 
       // Check convergence
       const gradNorm = Math.sqrt(gx * gx + gy * gy);
       if (gradNorm < this.tolerance) break;
 
       // Hessian of L
-      const Hxx = k * (logDelta - y - psi) - k * k * psi1 - 1 / qx;
-      const Hyy = -delta / theta - 1 / qy;
+      let Hxx = k * (logDelta - y - psi) - k * k * psi1 - 1 / qx;
+      let Hyy = -delta / theta - 1 / qy;
       const Hxy = -k;
+
+      // Add 2nd-order smoothness Hessian
+      if (this.intervals.length > 2) {
+        Hxx -= 2 * this.lambda2;
+        Hyy -= 2 * this.lambda2;
+      }
 
       // Solve 2x2: H * [dx, dy] = -[gx, gy]
       const det = Hxx * Hyy - Hxy * Hxy;
 
       let dx, dy;
-      if (Math.abs(det) > 1e-20 && det < 0) {
-        // Hessian is negative definite (det of negative-definite 2x2 > 0, but det itself < 0 since Hxx < 0)
-        // Actually for neg-def: Hxx < 0 and det > 0. Let me fix:
-        // We need -H positive definite. -Hxx > 0 and (-Hxx)(-Hyy) - (-Hxy)^2 > 0 => det > 0
-        // So det > 0 means H is negative definite.
-        dx = -(Hyy * gx - Hxy * gy) / det;
-        dy = -(Hxx * gy - Hxy * gx) / det;
-      } else if (Math.abs(det) > 1e-20 && det > 0 && Hxx < 0) {
-        // Negative definite case
+      // For maximization, Hessian should be negative definite:
+      // Hxx < 0 and det > 0
+      if (det > 0 && Hxx < 0) {
+        // Negative definite, use Newton step
         dx = -(Hyy * gx - Hxy * gy) / det;
         dy = -(Hxx * gy - Hxy * gx) / det;
       } else {
@@ -220,20 +380,25 @@ export class BPMEngine {
       y += dy;
 
       // Clamp parameters to reasonable range
+      // k ∈ [0.5, 100], theta adjusted based on k to keep BPM ∈ [20, 600]
       const kNew = Math.exp(x);
       const thetaNew = Math.exp(y);
-      if (kNew < 0.1) x = Math.log(0.1);
+
+      if (kNew < 0.5) x = Math.log(0.5);
       if (kNew > 100) x = Math.log(100);
-      if (thetaNew < 0.005) y = Math.log(0.005);
-      if (thetaNew > 10) y = Math.log(10);
+
+      // For BPM range [20, 600]: μ = k*θ ∈ [0.1, 3]
+      const mu = kNew * thetaNew;
+      if (mu < 0.1) {
+        // BPM too high, increase theta
+        y = Math.log(0.1 / kNew);
+      } else if (mu > 3.0) {
+        // BPM too low, decrease theta
+        y = Math.log(3.0 / kNew);
+      }
     }
 
     this.x = x;
     this.y = y;
-
-    const bpm = 60 * Math.exp(-(x + y));
-    // Clamp BPM to reasonable range
-    const clampedBpm = Math.max(1, Math.min(600, bpm));
-    this.bpmHistory.push({ time: timeMs, bpm: clampedBpm });
   }
 }

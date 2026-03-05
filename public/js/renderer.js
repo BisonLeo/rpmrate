@@ -303,8 +303,9 @@ export class Renderer {
       if (history[mid].time < startTime) lo = mid + 1;
       else hi = mid;
     }
-    // Include one before visible range for connecting line
-    if (lo > 0) lo--;
+    // Include two before visible range for spline continuity
+    if (lo > 1) lo -= 2;
+    else if (lo > 0) lo -= 1;
 
     ctx.strokeStyle = this.colors.curve;
     ctx.lineWidth = this.colors.curveWidth;
@@ -312,29 +313,28 @@ export class Renderer {
     ctx.lineCap = 'round';
     ctx.beginPath();
 
-    let started = false;
-    for (let i = lo; i < history.length; i++) {
-      const h = history[i];
-      const nextH = history[i + 1];
-      const x = this.timeToX(h.time);
-      const y = this.bpmToY(h.bpm);
+    if (history.length === 1) {
+      // Single point: just draw a horizontal line
+      const x = this.timeToX(history[0].time);
+      const y = this.bpmToY(history[0].bpm);
       const clampedY = Math.max(this.chartTop, Math.min(this.chartBottom, y));
-
-      if (!started) {
-        ctx.moveTo(x, clampedY);
-        started = true;
-      }
-
-      // Draw horizontal line to next event (step function)
-      if (nextH) {
-        const nextX = this.timeToX(nextH.time);
-        ctx.lineTo(nextX, clampedY); // horizontal to next event time
-        if (nextH.time > endTime) break;
-      } else {
-        // Extend to current time (or end of view)
-        const extendTo = Math.min(this.timeToX(Date.now()), this.chartRight);
-        ctx.lineTo(extendTo, clampedY);
-      }
+      ctx.moveTo(x, clampedY);
+      const extendTo = Math.min(this.timeToX(Date.now()), this.chartRight);
+      ctx.lineTo(extendTo, clampedY);
+    } else if (history.length === 2) {
+      // Two points: linear interpolation
+      const x0 = this.timeToX(history[0].time);
+      const y0 = this.bpmToY(history[0].bpm);
+      const x1 = this.timeToX(history[1].time);
+      const y1 = this.bpmToY(history[1].bpm);
+      ctx.moveTo(x0, Math.max(this.chartTop, Math.min(this.chartBottom, y0)));
+      ctx.lineTo(x1, Math.max(this.chartTop, Math.min(this.chartBottom, y1)));
+      // Extend to current time
+      const extendTo = Math.min(this.timeToX(Date.now()), this.chartRight);
+      ctx.lineTo(extendTo, Math.max(this.chartTop, Math.min(this.chartBottom, y1)));
+    } else {
+      // Three or more points: use Catmull-Rom spline for smooth C¹ continuity
+      this._drawCatmullRomSpline(ctx, history, lo, startTime, endTime);
     }
 
     ctx.stroke();
@@ -342,10 +342,85 @@ export class Renderer {
     // Draw glow effect (thick, transparent underneath)
     ctx.save();
     ctx.globalCompositeOperation = 'destination-over';
-    ctx.strokeStyle = this.colors.accent ? 'rgba(255, 107, 53, 0.15)' : 'rgba(255, 107, 53, 0.15)';
+    ctx.strokeStyle = 'rgba(255, 107, 53, 0.15)';
     ctx.lineWidth = 8;
     ctx.stroke();
     ctx.restore();
+  }
+
+  /**
+   * Draw a smooth Catmull-Rom spline through BPM history points.
+   * This provides C¹ continuity (continuous first derivative) which better
+   * represents the smooth Gamma parameter dynamics with 2nd-order prior.
+   */
+  _drawCatmullRomSpline(ctx, history, startIdx, startTime, endTime) {
+    const tension = 0.5; // 0.5 = standard Catmull-Rom, 0 = linear, 1 = tight curves
+    const segments = 20; // subdivisions per interval for smooth curves
+
+    let started = false;
+
+    for (let i = Math.max(0, startIdx); i < history.length - 1; i++) {
+      // Get four control points: P0, P1, P2, P3
+      // We draw the curve segment from P1 to P2
+      const p0 = i > 0 ? history[i - 1] : history[i]; // duplicate first point if at start
+      const p1 = history[i];
+      const p2 = history[i + 1];
+      const p3 = i < history.length - 2 ? history[i + 2] : history[i + 1]; // duplicate last point if at end
+
+      // Convert to screen coordinates
+      const x0 = this.timeToX(p0.time);
+      const y0 = this.bpmToY(p0.bpm);
+      const x1 = this.timeToX(p1.time);
+      const y1 = this.bpmToY(p1.bpm);
+      const x2 = this.timeToX(p2.time);
+      const y2 = this.bpmToY(p2.bpm);
+      const x3 = this.timeToX(p3.time);
+      const y3 = this.bpmToY(p3.bpm);
+
+      // Skip if segment is entirely outside view
+      if (x2 < this.chartLeft && x1 < this.chartLeft) continue;
+      if (x1 > this.chartRight) break;
+
+      // Start path at first point
+      if (!started) {
+        ctx.moveTo(x1, Math.max(this.chartTop, Math.min(this.chartBottom, y1)));
+        started = true;
+      }
+
+      // Draw Catmull-Rom curve from P1 to P2
+      for (let s = 1; s <= segments; s++) {
+        const t = s / segments;
+        const t2 = t * t;
+        const t3 = t2 * t;
+
+        // Catmull-Rom basis functions
+        const b0 = -tension * t3 + 2 * tension * t2 - tension * t;
+        const b1 = (2 - tension) * t3 + (tension - 3) * t2 + 1;
+        const b2 = (tension - 2) * t3 + (3 - 2 * tension) * t2 + tension * t;
+        const b3 = tension * t3 - tension * t2;
+
+        const x = b0 * x0 + b1 * x1 + b2 * x2 + b3 * x3;
+        const y = b0 * y0 + b1 * y1 + b2 * y2 + b3 * y3;
+
+        const clampedY = Math.max(this.chartTop, Math.min(this.chartBottom, y));
+        ctx.lineTo(x, clampedY);
+      }
+    }
+
+    // Extend to current time with last BPM value
+    if (history.length > 0) {
+      const lastH = history[history.length - 1];
+      const lastX = this.timeToX(lastH.time);
+      const lastY = this.bpmToY(lastH.bpm);
+      const clampedY = Math.max(this.chartTop, Math.min(this.chartBottom, lastY));
+
+      const currentTime = this.paused ? this.pauseTime : Date.now();
+      const extendTo = Math.min(this.timeToX(currentTime), this.chartRight);
+
+      if (extendTo > lastX) {
+        ctx.lineTo(extendTo, clampedY);
+      }
+    }
   }
 
   _drawPlayhead(ctx, anchorTime) {
